@@ -1,0 +1,113 @@
+#!/bin/sh
+## BEGIN USER CONFIG ##
+conf() {
+	SRC=*.c
+	BUILDDIR=build
+
+	TARGETS=build/bin/expr
+
+	CC="$(detect clang gcc cc)" || error 'Could not find C compiler'
+	CFLAGS='-std=c99 -Wall -pedantic -D_DEFAULT_SOURCE -D_POSIX_C_SOURCE=200809L'
+	[ -z "$NOJIT" ] && CFLAGS="$CFLAGS -DJIT"
+	LDFLAGS=
+}
+
+develconf() {
+	CFLAGS="$CFLAGS -g"
+}
+
+releaseconf() {
+	CFLAGS="$CFLAGS -DRELEASE -O3"
+}
+## END USER CONFIG ##
+
+error() {
+	echo ERROR: "$@" >&2
+	exit 1
+}
+
+detect() {
+	# Pick the first argument that can be found in PATH
+	for arg; do
+		if command -v "$arg" >/dev/null 2>&1; then
+			echo "$arg"
+			return
+		fi
+	done
+	false
+}
+
+deps() {
+	# Find the dependencies of a C file
+	cpp="$(detect cpp "$CC")"
+	[ -z "$cpp" ] && error 'Could not find C preprocessor'
+
+	"$cpp" $CFLAGS -E "$1" |
+	grep '^[ \t]*#[ \t]*\(line\|[ \t]\)[0-9]\+[ \t]\+"[^<>"]\+"' |
+	sed 's/^[^"]*"\([^<>"]\+\)".*$/\1/' |
+	sort -ur |
+	while read -r file; do
+		[ "$file" != "$1" ] && printf ' %s' "$file"
+	done || exit
+	echo
+}
+
+conf
+
+for arg; do
+	case "$arg" in
+		--release|-r) mode=r;;
+		--debug|--devel|-g) mode=d;;
+		-*) error "Unknown option '$arg'";;
+		*) error "Unexpected argument '$arg'";;
+	esac
+done
+
+case "$mode" in
+	d*|'') develconf;;
+	r*) releaseconf;;
+esac
+
+wspc='[
+	 ]'
+
+BUILDDIR="${BUILDDIR:-.}"
+
+set -- $SRC
+SRC=
+OBJ=
+check_deps=
+
+for f; do
+	[ -z "${f##*$wspc*}" ] && error "Source filename '$f' contains whitespace"
+
+	SRC="$SRC $f"
+	if [ -z "${f##*.c}" ]; then
+		check_deps="$check_deps $f"
+		objf="$BUILDDIR/obj/${f%.c}.o"
+		OBJ="$OBJ $BUILDDIR/obj/${f%.c}.o"
+	fi
+done
+
+{
+	echo '.POSIX:'
+	echo "SRC = $SRC"
+	echo "OBJ = $OBJ"
+	echo "TARGETS = $TARGETS"
+	echo "BUILDDIR = $BUILDDIR"
+	echo "CC = $CC"
+	echo "CFLAGS = $CFLAGS"
+	echo "LDFLAGS = $LDFLAGS"
+	echo
+	echo '.PHONY: all'
+	echo 'all: ${TARGETS}'
+
+	set -f; set -- $check_deps; set +f
+	[ "$#" -gt 0 ] && echo
+	for f; do
+		deps_list="$(deps "$f")" || exit
+		echo "$BUILDDIR/obj/${f%.c}.o:$deps_list"
+	done
+} >config.mk
+
+true

@@ -1,5 +1,4 @@
 // RPN expression evaluator
-#define _DEFAULT_SOURCE
 #include "v.h"
 
 enum {STACK_SIZE = 4096};
@@ -181,17 +180,29 @@ void jit_flush(struct jit_state *j) {
 void jit_write(struct jit_state *j, struct instruction i) {
 	switch (i.op) {
 	case POP_R:
-		if (j->buffer.op == PUSH_R && j->buffer.a == i.a) {
-			j->buffer.op = NO_OPCODE;
-			return;
+		switch (j->buffer.op) {
+		case PUSH_R:
+			if (i.a == j->buffer.a) {
+				j->buffer.op = NO_OPCODE;
+				return;
+			}
+
+		default:
+			break;
 		}
 		break;
 
-	// XXX: DANGEROUS! Works here because we know that registers are reset immediately after a push
 	case PUSH_R:
-		if (j->buffer.op == POP_R && j->buffer.a == i.a) {
-			j->buffer.op = NO_OPCODE;
-			return;
+		switch (j->buffer.op) {
+		// XXX: DANGEROUS! Works here because we know that registers are reset immediately after a push
+		case POP_R:
+			if (i.a == j->buffer.a) {
+				j->buffer.op = NO_OPCODE;
+				return;
+			}
+
+		default:
+			break;
 		}
 		break;
 
@@ -209,7 +220,7 @@ exprfn_t jit(char *expr) {
 	int stack = 0;
 
 	struct jit_state j = {0};
-	j.start = mmap(NULL, JIT_BUF_SIZE, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+	j.start = pagealloc(JIT_BUF_SIZE);
 	j.end = j.start + JIT_BUF_SIZE;
 	j.p = j.start;
 
@@ -270,7 +281,6 @@ exprfn_t jit(char *expr) {
 			EMIT(POP_R, reg2);
 			stack--;
 		} else {
-			if (++stack >= STACK_SIZE) panic("Stack overflow");
 			char *end;
 			long val = strtol(tok, &end, 0);
 			if (*end) panic("Invalid token: %s", tok);
@@ -283,7 +293,11 @@ exprfn_t jit(char *expr) {
 
 			// mov reg1, $val
 			EMIT(MOV_RI, reg1, val);
+			stack++;
 		}
+
+		if (stack >= STACK_SIZE) panic("Stack overflow");
+		if (stack <= 0) panic("Stack underflow");
 
 		tok = strtok(NULL, " ");
 	}
@@ -303,12 +317,6 @@ exprfn_t jit(char *expr) {
 	jit_flush(&j);
 
 	if (stack > 1) panic("%d extra values left on stack", stack - 1);
-	if (stack < 1) panic("No value left on stack");
-
-	FILE *f = fopen("test.bin", "wb");
-	if (!f) panic("Failed to open file");
-	if (fwrite(j.start, j.p - j.start, 1, f) != 1) panic("Failed to write file");
-	fclose(f);
 
 	mprotect(j.start, JIT_BUF_SIZE, PROT_EXEC);
 	return (exprfn_t)j.start;
@@ -319,27 +327,27 @@ enum {ITERATIONS = 10000000};
 int main(int argc, char **argv) {
 	if (argc < 2) panic("Not enough arguments");
 
-#if 0
 	char *expr = strdup(argv[1]);
+#ifdef JIT
+	exprfn_t fn = jit(expr);
+	int64_t val = fn();
+	free(expr);
+#else
 	int64_t val = eval(expr);
+#endif
 	for (int i = 0; i < ITERATIONS; i++) {
 		strcpy(expr, argv[1]);
-		int64_t val2 = eval(expr);
-		assert(val == val2, "Not deterministic! %"PRId64" != %"PRId64, val, val2);
-	}
-	free(expr);
-	printf("%ld\n", val);
-#else
-	char *expr = strdup(argv[1]);
-	exprfn_t fn = jit(expr);
-	free(expr);
-	int64_t val = fn();
-	for (int i = 0; i < ITERATIONS * 100; i++) {
+#ifdef JIT
 		int64_t val2 = fn();
+#else
+		int64_t val2 = eval(expr);
+#endif
 		assert(val == val2, "Not deterministic! %"PRId64" != %"PRId64, val, val2);
 	}
-	printf("%"PRId64"\n", val);
+#ifndef JIT
+	free(expr);
 #endif
+	printf("%ld\n", val);
 
 	return 0;
 }
